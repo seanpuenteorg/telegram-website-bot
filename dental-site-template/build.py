@@ -184,6 +184,157 @@ def replace_tokens(template_content, tokens):
     return result
 
 
+def _derive_country_code(phone_raw):
+    """Derive a display country code from a raw international phone number.
+
+    Returns one of the options the booking portal's country selector supports:
+    'UK +44', 'IE +353', or 'UK +44' as a safe default.
+    """
+    if not phone_raw:
+        return "UK +44"
+    stripped = phone_raw.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if stripped.startswith("+353") or stripped.startswith("00353"):
+        return "IE +353"
+    if stripped.startswith("+44") or stripped.startswith("0044"):
+        return "UK +44"
+    # UK local numbers (start with 0) default to UK
+    if stripped.startswith("0"):
+        return "UK +44"
+    return "UK +44"
+
+
+def build_clinic_config_for_portal(clinic_data, treatments, real_booking_url):
+    """Transform scraper output into the shape consumed by the booking portal SPA.
+
+    The portal's assets/app.js expects a CLINIC object with specific fields (name, logo,
+    phone, countryCode, locations[], categories[], treatments{}, clinician, availability[],
+    realBookingUrl). This function maps the raw scraper dict into that shape.
+    """
+    clinic_name = clinic_data.get("clinic_name", "")
+    phone_data = clinic_data.get("phone", {}) or {}
+    phone_raw = phone_data.get("raw", "") if isinstance(phone_data, dict) else ""
+    address_full = clinic_data.get("address", "") or ""
+    # Short address: drop the last segment (postcode / "UK") for display on location cards.
+    # e.g. "Davitt's Terrace, Castlebar, Mayo, F23 V227" → "Davitt's Terrace, Castlebar, F23 V227"
+    address_parts = [p.strip() for p in address_full.split(",") if p.strip()]
+    short_address = ", ".join(address_parts[:3]) if len(address_parts) >= 3 else address_full
+
+    # Map treatments: scraper gives name + price, portal expects name + optional deposit.
+    # Convert price strings like "£50" / "€15" / "from £120" to deposit int where possible.
+    def _parse_deposit(price_str):
+        if not price_str:
+            return None
+        import re as _re
+        m = _re.search(r"[£€$]?\s*(\d+)", str(price_str))
+        return int(m.group(1)) if m else None
+
+    checkup_treatments = []
+    for t in (treatments or [])[:6]:  # cap at 6 to keep the list readable
+        checkup_treatments.append({
+            "id": slugify(t.get("name", "")),
+            "name": t.get("name", ""),
+            "duration": t.get("duration", "30 mins"),
+            "deposit": _parse_deposit(t.get("price", "")),
+            "description": t.get("desc") or f"Professional {t.get('name','treatment').lower()} at {clinic_name}. Book your appointment with our expert team.",
+        })
+    # Always append a "Something else" option to match Dentally's real UX
+    checkup_treatments.append({
+        "id": "other",
+        "name": "Something else",
+        "duration": None,
+        "deposit": None,
+        "description": None,
+    })
+
+    # Pick the first team member as the displayed clinician, or fall back to a generic label.
+    team = clinic_data.get("team", []) or []
+    if team and isinstance(team[0], dict) and team[0].get("name"):
+        c_name = team[0].get("name", "")
+        c_title = team[0].get("title") or "Dentist"
+        # Initials from first + last name
+        name_parts = c_name.replace(",", "").split()
+        initials = (name_parts[0][0] + name_parts[-1][0]).upper() if len(name_parts) >= 2 else (name_parts[0][:2].upper() if name_parts else "DR")
+    else:
+        c_name = f"The {clinic_name} team"
+        c_title = "Dentist"
+        initials = "DR"
+
+    return {
+        "name": clinic_name,
+        "logo": "/logo.png",
+        "phone": phone_raw,
+        "countryCode": _derive_country_code(phone_raw),
+        "realBookingUrl": real_booking_url or "",
+        "locations": [{
+            "id": "main",
+            "name": clinic_name,
+            "address": address_full,
+            "shortAddress": short_address,
+        }],
+        "categories": [
+            {"id": "checkup",      "name": "Dental checkup",  "description": "A checkup to screen for common problems"},
+            {"id": "emergency",    "name": "Emergency",       "description": "For debilitating pain or accidents"},
+            {"id": "consultation", "name": "Consultation",    "description": "Free consultations for cosmetic dentistry, implants, and Invisalign"},
+            {"id": "other",        "name": "Something else",  "description": f"Can't see the appointment you need? Contact us on {phone_raw or 'our phone'} to discuss your options."},
+        ],
+        "treatments": {
+            "checkup":      checkup_treatments,
+            "emergency":    [{"id": "em-1", "name": "Emergency appointment", "duration": "20 mins", "deposit": 80, "description": "Urgent pain relief and assessment."}],
+            "consultation": [{"id": "co-1", "name": "Free Consultation", "duration": "20 mins", "deposit": None, "description": "Discuss your options with our expert team, no obligation."}],
+            "other":        [],
+        },
+        "clinician": {"name": c_name, "initials": initials, "title": c_title},
+        # Static availability pattern — mirrors the hardcoded Cube Dental demo.
+        # Dates are placeholder; the demo is visual only, real bookings happen via realBookingUrl.
+        "availability": [
+            {"label": "Mon 18 May", "dateFull": "Monday 18th May 2026", "slots": ["10:50","11:20","15:00","15:10","15:20","15:30","15:40","15:50","16:00"]},
+            {"unavailable": "TUE 19 MAY - SUN 07 JUNE"},
+            {"label": "Mon 08 June", "dateFull": "Monday 8th June 2026", "slots": ["09:30","09:40","09:50","10:00","10:10","10:20","10:30","10:40","10:50"]},
+            {"unavailable": "TUE 09 JUNE - SUN 14 JUNE"},
+            {"label": "Mon 15 June", "dateFull": "Monday 15th June 2026", "slots": ["09:30","09:40","09:50","10:00","10:10","10:20","10:30","10:40","10:50"]},
+        ],
+    }
+
+
+def build_booking_portal(output_path, tokens, clinic_config):
+    """Render the booking portal into {output_path}/book/ from book-template.html + book-app-template.js.
+
+    Writes two files:
+      - {output_path}/book/index.html — HTML shell with {{TOKEN}} substitution and clinic config JSON injected
+      - {output_path}/book/app.js     — unchanged copy of the booking portal SPA logic
+
+    The portal reads window.KAISER_CLINIC_CONFIG (set in index.html) and renders the clinic-branded flow.
+    """
+    book_dir = output_path / "book"
+    book_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. HTML template with clinic config JSON + brand tokens + logo path injected
+    html_template_path = TEMPLATE_DIR / "book-template.html"
+    if not html_template_path.exists():
+        print("  WARNING: book-template.html not found, skipping booking portal", file=sys.stderr)
+        return
+    html_content = html_template_path.read_text()
+    portal_tokens = {
+        **tokens,
+        "CLINIC_CONFIG_JSON": json.dumps(clinic_config, ensure_ascii=False),
+        "LOGO_PATH": "/logo.png",
+    }
+    html_content = replace_tokens(html_content, portal_tokens)
+    (book_dir / "index.html").write_text(html_content)
+    print(f"  Built book/index.html ({len(html_content)} bytes)", file=sys.stderr)
+
+    # 2. App JS copied verbatim — contains router, state, and both dev (hardcoded CLINICS)
+    #    and production (window.KAISER_CLINIC_CONFIG) rendering paths. The production path wins
+    #    when the HTML injects window.KAISER_CLINIC_CONFIG in the <head>.
+    js_template_path = TEMPLATE_DIR / "book-app-template.js"
+    if not js_template_path.exists():
+        print("  WARNING: book-app-template.js not found, skipping booking portal JS", file=sys.stderr)
+        return
+    js_content = js_template_path.read_text()
+    (book_dir / "app.js").write_text(js_content)
+    print(f"  Built book/app.js ({len(js_content)} bytes)", file=sys.stderr)
+
+
 def call_claude(prompt, model="claude-haiku-4-5-20251001", max_tokens=2000):
     """Call Claude API for copy generation."""
     if not HAS_ANTHROPIC:
@@ -330,10 +481,17 @@ def build_site(clinic_url, output_dir, no_deploy=False, no_claude=False):
     phone_data = clinic_data.get("phone", {})
     phone_raw = phone_data.get("raw", "") if isinstance(phone_data, dict) else ""
     phone_display = phone_data.get("display", phone_raw) if isinstance(phone_data, dict) else ""
-    email = clinic_data.get("email", "")
-    address = clinic_data.get("address", "")
+    email = clinic_data.get("email", "") or ""
+    address = clinic_data.get("address", "") or ""
     address_encoded = address.replace(" ", "+").replace(",", "%2C") if address else ""
-    booking_url = clinic_data.get("booking_url", "#")
+    # Original booking URL scraped from the clinic site (Dentally portal / Cal.com / contact page).
+    # This becomes the final destination when a visitor clicks "Book" in the embedded booking portal
+    # at /book/ — they get redirected here to finalize the real booking in the clinic's existing system.
+    real_booking_url = clinic_data.get("booking_url") or ""
+    # Marketing-site CTAs ("Book Now" buttons in index/about/treatments/contact templates) now point
+    # to the embedded /book/ portal — a Kaiser-branded UI that captures treatment + date + slot
+    # choices, then redirects to real_booking_url when the user is ready to finalize.
+    booking_url = "/book/"
     hours = clinic_data.get("hours", [])
     hours_summary = " | ".join([f"{h['day']}: {h['time']}" for h in hours]) if hours else ""
 
@@ -491,6 +649,16 @@ def build_site(clinic_url, output_dir, no_deploy=False, no_claude=False):
         (output_path / "styles.css").write_text(css_content)
         print("  Built styles.css", file=sys.stderr)
 
+    # Build embedded booking portal at /book/.
+    # Every clinic site Kaiser builds gets a Kaiser-branded booking flow at {clinicdomain}/book/
+    # — a clickable multi-step funnel that captures patient intent, then redirects to the
+    # clinic's real booking system (Dentally/Cal.com/etc) via realBookingUrl at the final step.
+    # Marketing-site CTAs ("Book Now" buttons) have already been retargeted to /book/ via
+    # the BOOKING_URL token earlier in this function.
+    print("  Building embedded booking portal at /book/...", file=sys.stderr)
+    clinic_config_for_portal = build_clinic_config_for_portal(clinic_data, treatments, real_booking_url)
+    build_booking_portal(output_path, tokens, clinic_config_for_portal)
+
     # Copy Dockerfile and nginx.conf if not already there
     for f in ["Dockerfile", "nginx.conf"]:
         if not (output_path / f).exists():
@@ -498,22 +666,31 @@ def build_site(clinic_url, output_dir, no_deploy=False, no_claude=False):
             if src.exists():
                 shutil.copy2(src, output_path / f)
 
-    # Create Dockerfile if missing
+    # Create Dockerfile if missing — uses nginx template processor for Railway $PORT
     if not (output_path / "Dockerfile").exists():
         (output_path / "Dockerfile").write_text(
-            "FROM nginx:alpine\nCOPY . /usr/share/nginx/html\nCOPY nginx.conf /etc/nginx/conf.d/default.conf\nEXPOSE 80\n"
+            "FROM nginx:alpine\n"
+            "ENV NGINX_ENVSUBST_FILTER=^PORT$\n"
+            "COPY . /usr/share/nginx/html\n"
+            "COPY nginx.conf /etc/nginx/templates/default.conf.template\n"
+            "RUN rm -f /etc/nginx/conf.d/default.conf\n"
         )
 
-    # Create nginx.conf if missing
+    # Create nginx.conf if missing — uses $PORT for Railway dynamic port
     if not (output_path / "nginx.conf").exists():
         (output_path / "nginx.conf").write_text("""server {
-    listen 80;
+    listen $PORT;
     server_name _;
     root /usr/share/nginx/html;
     index index.html;
 
     location / {
         try_files $uri $uri/ $uri.html =404;
+    }
+
+    # Embedded booking portal SPA fallback: unknown paths under /book/ → /book/index.html
+    location /book/ {
+        try_files $uri $uri/ /book/index.html;
     }
 
     location ~* \\.(css|js|png|jpg|jpeg|svg|woff2|woff|ico)$ {
@@ -544,18 +721,68 @@ def build_site(clinic_url, output_dir, no_deploy=False, no_claude=False):
                 capture_output=True, text=True
             )
             if result.returncode != 0:
-                print(f"  Warning: Asset setup failed: {result.stderr}", file=sys.stderr)
+                # Relay both stdout and stderr so we can see Python traceback from setup-assets.sh
+                combined = (result.stdout or "") + (result.stderr or "")
+                print(f"  Warning: Asset setup failed (exit {result.returncode}):", file=sys.stderr)
+                for line in combined.splitlines()[:10]:
+                    print(f"    {line}", file=sys.stderr)
             else:
-                print("  Assets generated", file=sys.stderr)
+                # Print the important lines (errors surface even on exit 0 warnings)
+                for line in (result.stderr or "").splitlines():
+                    if line.strip() and not line.strip().startswith("total"):
+                        print(f"  {line}", file=sys.stderr)
     else:
         print("  No logo URL found, creating placeholder favicons", file=sys.stderr)
         # Create minimal placeholder SVG favicon
         (output_path / "favicon.svg").write_text(
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="{palette["BRAND_PRIMARY"]}"/><text x="16" y="22" font-size="18" text-anchor="middle" fill="white" font-family="sans-serif">{clinic_name[0]}</text></svg>'
         )
-        # Create empty PNGs (will fail validation but at least exist)
-        for fname in ["favicon.png", "apple-touch-icon.png", "logo.png"]:
-            (output_path / fname).write_text("")
+
+    # Determine which logo file actually landed on disk. setup-assets.sh writes EITHER
+    # logo.svg (SVG source) OR logo.png (raster source) — never both. Every template that
+    # references the logo needs to use the right path, so we compute it once here and
+    # propagate via tokens (LOGO_PATH) and re-render any templates that already used the
+    # hardcoded /logo.png default.
+    logo_svg_exists = (output_path / "logo.svg").exists()
+    logo_png_exists = (output_path / "logo.png").exists() and (output_path / "logo.png").stat().st_size > 0
+    if logo_svg_exists:
+        logo_path_rel = "/logo.svg"
+    elif logo_png_exists:
+        logo_path_rel = "/logo.png"
+    else:
+        # No usable logo — build still succeeds, but references will 404. Create a minimal
+        # SVG placeholder with the clinic's initial so templates don't render broken images.
+        placeholder_svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+            f'<rect width="100" height="100" rx="12" fill="{palette["BRAND_PRIMARY"]}"/>'
+            f'<text x="50" y="66" font-size="56" text-anchor="middle" fill="white" '
+            f'font-family="Inter,sans-serif" font-weight="700">{(clinic_name or "?")[0]}</text>'
+            f'</svg>'
+        )
+        (output_path / "logo.svg").write_text(placeholder_svg)
+        logo_path_rel = "/logo.svg"
+        print("  Generated placeholder logo.svg", file=sys.stderr)
+
+    # Update the LOGO_TAG token to use the resolved logo path. The templates we already
+    # rendered above used the default /logo.png — re-render the marketing pages now that
+    # we know the correct path. This is a surgical swap of the LOGO_TAG src attribute only.
+    new_logo_tag = f'<img src="{logo_path_rel}" alt="{clinic_name}" style="height:56px;width:auto;">'
+    if logo_path_rel != "/logo.png":
+        for page in ["index.html", "about.html", "treatments.html", "contact.html"]:
+            page_path = output_path / page
+            if page_path.exists():
+                content = page_path.read_text()
+                content = content.replace(
+                    f'<img src="/logo.png" alt="{clinic_name}" style="height:56px;width:auto;">',
+                    new_logo_tag,
+                )
+                page_path.write_text(content)
+
+    # Re-build the booking portal with the correct LOGO_PATH so its <img data-clinic-logo> and
+    # window.KAISER_CLINIC_CONFIG.logo both point to the real file. Re-running is cheap.
+    clinic_config_for_portal["logo"] = logo_path_rel
+    rebuilt_tokens = {**tokens, "LOGO_PATH": logo_path_rel, "LOGO_TAG": new_logo_tag}
+    build_booking_portal(output_path, rebuilt_tokens, clinic_config_for_portal)
 
     # Step 7: Validate
     print("[7/7] Running validator...", file=sys.stderr)

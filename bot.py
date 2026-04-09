@@ -103,7 +103,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "  /build <url> — Build a website\n"
         "  /status — Check build progress\n"
-        "  /builds — Recent builds\n\n"
+        "  /builds — List live builds\n"
+        "  /protect <name> — Mark a build as protected\n"
+        "  /cleanup <name> — Delete a Railway project\n"
+        "  /costs — Estimate Railway monthly cost\n\n"
         "Example:\n"
         "  /build https://www.example-dental.co.uk"
     )
@@ -124,26 +127,210 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No build in progress.")
 
 
+def _build_age(build):
+    """Return a human-readable age string for a build."""
+    ts = build.get("timestamp", "")
+    if not ts:
+        return ""
+    try:
+        created = datetime.fromisoformat(ts)
+        delta = datetime.now() - created
+        if delta.days > 0:
+            return f"{delta.days}d old"
+        hours = delta.seconds // 3600
+        if hours > 0:
+            return f"{hours}h old"
+        return f"{delta.seconds // 60}m old"
+    except Exception:
+        return ""
+
+
+def _find_builds(query):
+    """Case-insensitive partial match against clinic_name and repo_name."""
+    q = query.lower().strip()
+    return [
+        b for b in recent_builds
+        if not b.get("deleted")
+        and (q in b.get("clinic_name", "").lower()
+             or q in b.get("repo_name", "").lower())
+    ]
+
+
 async def cmd_builds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
 
-    if not recent_builds:
-        await update.message.reply_text("No builds yet.")
+    live = [b for b in recent_builds if not b.get("deleted")]
+    if not live:
+        await update.message.reply_text("No live builds.")
         return
 
-    lines = []
-    for b in recent_builds[-10:]:
-        status = "live" if b.get("railway_url") else "local"
-        lines.append(
-            f"  {b.get('clinic_name', 'Unknown')} [{status}]\n"
-            f"  {b.get('railway_url', b.get('github_url', 'no URL'))}\n"
-            f"  {b.get('page_count', '?')} pages, {b.get('build_time_seconds', '?')}s\n"
-        )
+    lines = ["Live Builds\n━━━━━━━━━━━━\n"]
+    for b in live[-15:]:
+        name = b.get("clinic_name", "Unknown")
+        url = b.get("railway_url", "no URL")
+        age = _build_age(b)
+        protected = " 🔒" if b.get("protected") else ""
+        pages = b.get("page_count", "?")
 
+        lines.append(f"{name}{protected}")
+        lines.append(f"  {url}")
+        meta = f"  {pages} pages"
+        if age:
+            meta += f" · {age}"
+        lines.append(meta)
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_protect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /protect <clinic-name>")
+        return
+
+    query = " ".join(context.args)
+    matches = _find_builds(query)
+
+    if not matches:
+        await update.message.reply_text(f"No build found matching '{query}'")
+        return
+
+    for b in matches:
+        b["protected"] = True
+    save_builds()
+
+    names = "\n".join(f"  • {m['clinic_name']}" for m in matches)
     await update.message.reply_text(
-        "Recent Builds\n━━━━━━━━━━━━━\n\n" + "\n".join(lines)
+        f"Protected {len(matches)} build(s):\n{names}\n\n"
+        f"These will not appear in cleanup suggestions."
     )
+
+
+async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /cleanup <clinic-name>\n\n"
+            "This will delete the Railway project permanently. "
+            "The URL will go offline. GitHub repo remains untouched."
+        )
+        return
+
+    query = " ".join(context.args)
+    matches = _find_builds(query)
+
+    if not matches:
+        await update.message.reply_text(f"No live build matching '{query}'")
+        return
+
+    if len(matches) > 1:
+        names = "\n".join(f"  • {m['clinic_name']}" for m in matches[:5])
+        await update.message.reply_text(
+            f"Multiple matches — be more specific:\n{names}"
+        )
+        return
+
+    build = matches[0]
+    name = build.get("clinic_name", "?")
+
+    if build.get("protected"):
+        await update.message.reply_text(
+            f"{name} is protected. Use a different command or remove protection manually."
+        )
+        return
+
+    project_id = build.get("railway_project_id")
+    if not project_id:
+        await update.message.reply_text(
+            f"No Railway project ID stored for {name}.\n"
+            f"Delete manually from the Railway dashboard:\n"
+            f"https://railway.com/dashboard"
+        )
+        return
+
+    await update.message.reply_text(f"Deleting {name} from Railway...")
+
+    try:
+        # Link to the target project
+        link_proc = await asyncio.create_subprocess_exec(
+            "npx", "-y", "@railway/cli", "link", "--project", project_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await link_proc.communicate()
+
+        # Delete the project
+        del_proc = await asyncio.create_subprocess_exec(
+            "npx", "-y", "@railway/cli", "delete", "--yes",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await del_proc.communicate()
+
+        if del_proc.returncode != 0:
+            # Try alternate command name
+            alt_proc = await asyncio.create_subprocess_exec(
+                "npx", "-y", "@railway/cli", "project", "delete", "--yes",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await alt_proc.communicate()
+
+        build["deleted"] = True
+        build["deleted_at"] = datetime.now().isoformat()
+        save_builds()
+
+        await update.message.reply_text(
+            f"Deleted {name} from Railway.\n"
+            f"URL is now offline. GitHub repo preserved."
+        )
+    except Exception as e:
+        logger.exception(f"Cleanup failed: {e}")
+        await update.message.reply_text(f"Cleanup failed: {str(e)[:200]}")
+
+
+async def cmd_costs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return
+
+    live = [b for b in recent_builds if not b.get("deleted")]
+    protected = [b for b in live if b.get("protected")]
+
+    per_site = 0.50  # Rough estimate for idle nginx:alpine
+    total = len(live) * per_site
+
+    # Age breakdown
+    old = [b for b in live if not b.get("protected") and _build_age(b).endswith("d old")]
+    try:
+        old = [b for b in old if int(_build_age(b).split("d")[0]) > 30]
+    except Exception:
+        old = []
+
+    lines = [
+        "Railway Cost Estimate",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"Live builds: {len(live)}",
+        f"Protected: {len(protected)}",
+        f"Older than 30 days: {len(old)}",
+        "",
+        f"Estimated monthly cost: ~${total:.2f}",
+        f"(${per_site:.2f}/site rough estimate)",
+    ]
+
+    if old:
+        lines.append("")
+        lines.append("Candidates for /cleanup:")
+        for b in old[:5]:
+            lines.append(f"  • {b.get('clinic_name', '?')} ({_build_age(b)})")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,14 +477,34 @@ async def run_build(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            await deploy_proc.communicate()
+            deploy_stdout, deploy_stderr = await deploy_proc.communicate()
+            deploy_text = deploy_stdout.decode()
+            deploy_err_text = deploy_stderr.decode()
+            logger.info(f"deploy stdout:\n{deploy_text}")
+            logger.info(f"deploy stderr:\n{deploy_err_text}")
 
-            github_url = f"https://github.com/seanpuenteorg/{repo_name}"
-            railway_url = f"https://{repo_name}-production.up.railway.app"
+            # Parse key=value lines from deploy.sh stdout
+            railway_url = None
+            railway_project_id = None
+            github_url = None
+            for line in deploy_text.splitlines():
+                line = line.strip()
+                if line.startswith("RAILWAY_URL="):
+                    railway_url = line.split("=", 1)[1].strip() or None
+                elif line.startswith("RAILWAY_PROJECT_ID="):
+                    railway_project_id = line.split("=", 1)[1].strip() or None
+                elif line.startswith("GITHUB_URL="):
+                    github_url = line.split("=", 1)[1].strip() or None
+
+            if not github_url:
+                github_url = f"https://github.com/seanpuenteorg/{repo_name}"
+            if not railway_url:
+                railway_url = f"https://{repo_name}-production.up.railway.app"
 
             result["github_url"] = github_url
             result["railway_url"] = railway_url
             result["repo_name"] = repo_name
+            result["railway_project_id"] = railway_project_id
 
             # Take screenshot
             current_build["status"] = "screenshot"
@@ -310,9 +517,26 @@ async def run_build(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str
             has_screenshot = False
             try:
                 from screenshotter import take_screenshot
-                await asyncio.sleep(10)  # Wait for Railway deploy
-                await take_screenshot(railway_url, screenshot_path)
-                has_screenshot = True
+                # Poll the URL until it responds 200 (Railway build + deploy)
+                import urllib.request
+                ready = False
+                for attempt in range(40):  # up to ~4 minutes
+                    await asyncio.sleep(6)
+                    try:
+                        req = urllib.request.Request(railway_url, method="HEAD")
+                        with urllib.request.urlopen(req, timeout=5) as resp:
+                            if resp.status == 200:
+                                ready = True
+                                break
+                    except Exception:
+                        pass
+                    if attempt % 5 == 0 and attempt > 0:
+                        current_build["status"] = f"waiting for Railway ({attempt * 6}s)"
+                if ready:
+                    await take_screenshot(railway_url, screenshot_path)
+                    has_screenshot = True
+                else:
+                    logger.warning(f"Railway URL not ready after 4 minutes: {railway_url}")
             except Exception as e:
                 logger.warning(f"Screenshot failed: {e}")
 
@@ -372,6 +596,9 @@ def main():
     app.add_handler(CommandHandler("build", cmd_build))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("builds", cmd_builds))
+    app.add_handler(CommandHandler("protect", cmd_protect))
+    app.add_handler(CommandHandler("cleanup", cmd_cleanup))
+    app.add_handler(CommandHandler("costs", cmd_costs))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_message))
 
     print("Bot started. Waiting for messages...")
