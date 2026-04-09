@@ -1,0 +1,6 @@
+python-telegram-bot==21.6
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+anthropic>=0.84.0
+playwright>=1.58.0
+Pillow>=10.0.0

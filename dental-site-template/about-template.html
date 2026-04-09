@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{META_TITLE}}</title>
+    <meta name="description" content="{{META_DESC}}">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="nav-wrapper">
+    <nav class="nav">
+        <a href="/" class="nav-logo">
+            {{LOGO_TAG}}
+        </a>
+        <ul class="nav-links" id="navLinks">
+            <li><a href="/" >Home</a></li>
+            <li class="nav-dropdown">
+                <a href="/treatments.html" >Treatments
+                    <svg class="nav-dropdown-arrow" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
+                </a>
+                <div class="nav-dropdown-menu">
+                    {{TREATMENT_NAV_LINKS}}
+                </div>
+            </li>
+            <li><a href="/about.html" class="active">About</a></li>
+            <li><a href="/contact.html" >Contact</a></li>
+        </ul>
+        <div class="nav-ctas">
+            <a href="{{BOOKING_URL}}" class="btn btn-primary" target="_blank" rel="noopener noreferrer">Book Now</a>
+            <a href="tel:{{PHONE_RAW}}" class="btn btn-secondary">Call Us</a>
+        </div>
+        <button class="nav-mobile-toggle" onclick="document.getElementById('navLinks').classList.toggle('open')" aria-label="Menu">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" /></svg>
+        </button>
+    </nav>
+</header>
+
+<section class="page-header">
+    <h1>{{ABOUT_HEADING}}</h1>
+    <p>{{ABOUT_SUBHEADING}}</p>
+</section>
+
+<section class="treatment-detail" style="max-width:800px;margin:0 auto;padding:60px 24px;">
+    {{CLINIC_STORY}}
+</section>
+
+{{TEAM_SECTION}}
+
+{{WHY_CHOOSE_US}}
+
+<div class="cta-banner">
+    <h2>{{CTA_HEADING}}</h2>
+    <p>{{CTA_SUBHEADING}}</p>
+    <a href="{{BOOKING_URL}}" class="btn btn-primary btn-lg" target="_blank" rel="noopener noreferrer">Book Now</a>
+</div>
+<footer class="footer">
+    <div class="footer-content">
+        <div class="footer-logo">{{CLINIC_NAME}}</div>
+        <div class="footer-info">
+            <a href="https://maps.google.com/?q={{ADDRESS_ENCODED}}" target="_blank" rel="noopener noreferrer">{{ADDRESS}}</a><br>
+            <a href="tel:{{PHONE_RAW}}">{{PHONE}}</a><br>
+            <a href="mailto:{{EMAIL}}">{{EMAIL}}</a>
+        </div>
+        <div class="footer-info" style="margin-top:16px;font-size:14px;color:rgba(255,255,255,0.5);">{{HOURS_SUMMARY}}</div>
+        <div class="footer-bottom">&copy; {{YEAR}} {{CLINIC_NAME}}. All rights reserved.</div>
+    </div>
+</footer>
+
+<a href="{{BOOKING_URL}}" class="float-cta" target="_blank" rel="noopener noreferrer" aria-label="Book Now" style="background:var(--brand-primary);">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="white" style="width:28px;height:28px"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" /></svg>
+</a>
+
+</body>
+</html>
